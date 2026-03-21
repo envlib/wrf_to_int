@@ -14,9 +14,12 @@
 
 ---
 ## Overview
-This package provides a command line utility that converts wrfout files to WPS intermediate files specifically for use as input to metgrid.exe for a new subdomain that is in a different coordinate system than the original WRF domain.
+This package provides two things:
 
-WRF stores data on native eta/sigma levels using an Arakawa C-grid with staggered variables. This tool handles:
+1. A **command line utility** that converts wrfout files to WPS intermediate files for use with metgrid.exe
+2. A **shared library** for writing WPS intermediate files, used by [era5_to_int](https://github.com/era5_to_int) and [cfdb-ingest](https://github.com/mullenkamp/cfdb-ingest)
+
+WRF stores data on native eta/sigma levels using an Arakawa C-grid with staggered variables. The CLI tool handles:
 
 - **Vertical interpolation** from eta levels to pressure levels (linear interpolation in ln(pressure) space)
 - **Unstaggering** of U, V, and geopotential height fields
@@ -139,6 +142,92 @@ Then run `metgrid.exe` as usual. The intermediate files contain all the fields m
 | SNOW | Snow water equivalent (kg/m2) | SNOW |
 | SNOWH | Physical snow depth (m) | SNOWH |
 | SM/ST | Soil moisture/temperature | SMOIS, TSLB (per layer from DZS) |
+
+## Library API
+
+This package exports shared tools for writing WPS intermediate files. Other `*_to_int` converters can depend on `wrf_to_int` instead of duplicating the Fortran I/O and WPS format code.
+
+```python
+from wrf_to_int import IntermediateFile, Projections, MapProjection, write_slab
+```
+
+### Projections
+
+Enum of WPS intermediate file projection codes:
+
+```python
+Projections.LATLON   # 0 - Cylindrical equidistant
+Projections.MERC     # 1 - Mercator
+Projections.LC       # 3 - Lambert Conformal
+Projections.GAUSS    # 4 - Gaussian
+Projections.PS       # 5 - Polar Stereographic
+Projections.CASSINI  # 6 - Cassini
+```
+
+### MapProjection
+
+Stores projection parameters for the WPS intermediate file header:
+
+```python
+proj = MapProjection(
+    projType=Projections.LC,
+    startLat=-47.43, startLon=165.32,
+    startI=1.0, startJ=1.0,
+    deltaLat=0.0, deltaLon=0.0,
+    dx=3.0, dy=3.0,           # km (not meters)
+    truelat1=-41.24, truelat2=-41.24,
+    xlonc=178.29,
+)
+```
+
+### IntermediateFile
+
+Opens and writes a WPS intermediate format binary file:
+
+```python
+intfile = IntermediateFile('ERA5', '2023-02-10_00')  # creates ERA5:2023-02-10_00
+# ... write slabs ...
+intfile.close()
+```
+
+### write_slab
+
+Writes a single 2D field to an open intermediate file. Handles NaN masking, bytes-to-string decoding, and numpy array conversion automatically:
+
+```python
+write_slab(intfile, slab, xlvl, proj, 'TT', hdate, 'K', 'ERA5 reanalysis', 'Temperature')
+```
+
+Parameters:
+- `intfile` — an `IntermediateFile` instance
+- `slab` — 2D numpy array (ny, nx)
+- `xlvl` — pressure level in Pa, or special values: 200100.0 (surface), 201300.0 (MSL), 1.0 (terrain)
+- `proj` — a `MapProjection` instance
+- `WPSname` — WPS field name (e.g., 'TT', 'UU', 'GHT')
+- `hdate` — date string in WPS format ('YYYY-MM-DD_HH:00:00')
+- `units`, `map_source`, `desc` — metadata strings
+
+### Example: building a custom converter
+
+```python
+from wrf_to_int import IntermediateFile, Projections, MapProjection, write_slab
+import numpy as np
+
+proj = MapProjection(
+    projType=Projections.LATLON,
+    startLat=-10.0, startLon=120.0,
+    startI=1.0, startJ=1.0,
+    deltaLat=-0.25, deltaLon=0.25,
+)
+
+intfile = IntermediateFile('MYDATA', '2023-02-10_00')
+
+slab = np.random.randn(201, 321).astype(np.float32)
+write_slab(intfile, slab, 200100.0, proj, 'TT', '2023-02-10_00:00:00',
+           'K', 'Custom source', '2m Temperature')
+
+intfile.close()
+```
 
 ## Implementation notes
 

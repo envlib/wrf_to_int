@@ -158,11 +158,19 @@ class MapProjection:
         self.xlonc = xlonc
 
 
+def _ensure_str(val):
+    """Decode bytes to str if needed (h5netcdf attrs may return bytes)."""
+    if isinstance(val, bytes):
+        return val.decode()
+    return str(val)
+
+
 def write_slab(intfile, slab, xlvl, proj, WPSname, hdate, units, map_source, desc):
     """Write a 2D field slab to an opened WPS intermediate file.
 
     Handles both regular numpy arrays and masked arrays. NaN values are
     converted to the WPS missing value sentinel (-1.0e30).
+    String parameters are decoded from bytes if needed (for h5netcdf compatibility).
 
     WPS intermediate file convention: earth_radius in km, dx/dy in km.
     """
@@ -174,5 +182,6 @@ def write_slab(intfile, slab, xlvl, proj, WPSname, hdate, units, map_source, des
         5, data.shape[1], data.shape[0], proj.projType, 0.0, xlvl,
         proj.startLat, proj.startLon, proj.startI, proj.startJ,
         proj.deltaLat, proj.deltaLon, proj.dx, proj.dy, proj.xlonc,
-        proj.truelat1, proj.truelat2, 6371.229, 0, WPSname,
-        hdate, units, map_source, desc, data.filled(missing_value))
+        proj.truelat1, proj.truelat2, 6371.229, 0, _ensure_str(WPSname),
+        _ensure_str(hdate), _ensure_str(units), _ensure_str(map_source),
+        _ensure_str(desc), data.filled(missing_value))
