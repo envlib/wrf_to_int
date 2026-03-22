@@ -246,7 +246,7 @@ def interp_to_pressure_levels(field_3d, pressure_3d, target_levels_pa):
         sort_idx = np.argsort(log_p_col)
         result_2d[:, col] = np.interp(
             log_target, log_p_col[sort_idx], field_col[sort_idx],
-            left=np.nan, right=np.nan,
+            right=np.nan,
         )
 
     return result
@@ -389,6 +389,7 @@ def process_timestep(nc, t_idx, hdate, proj, intfile, target_pressure_levels_pa,
         write_slab(intfile, v10, 200100.0, proj, 'VV', hdate, 'm s-1', map_source, 'V-component of wind')
 
     q2 = np.asarray(nc['Q2'][t_idx], dtype=np.float64)
+    write_slab(intfile, q2 / (1.0 + q2), 200100.0, proj, 'SPECHUMD', hdate, 'kg kg-1', map_source, 'Specific humidity')
     write_slab(intfile, compute_dewpoint(q2, psfc), 200100.0, proj, 'DEWPT', hdate, 'K', map_source, 'Dewpoint temperature')
     write_slab(intfile, compute_relative_humidity(t2, q2, psfc), 200100.0, proj, 'RH', hdate, '%', map_source, 'Relative humidity')
 
@@ -403,7 +404,7 @@ def process_timestep(nc, t_idx, hdate, proj, intfile, target_pressure_levels_pa,
     if 'SST' in nc:
         write_slab(intfile, np.asarray(nc['SST'][t_idx], dtype=np.float64), 200100.0, proj, 'SST', hdate, 'K', map_source, 'Sea surface temperature')
 
-    write_slab(intfile, hgt, 1.0, proj, 'SOILHGT', hdate, 'm', map_source, 'Terrain height')
+    write_slab(intfile, hgt, 200100.0, proj, 'SOILHGT', hdate, 'm', map_source, 'Terrain height')
 
     if 'SNOW' in nc:
         write_slab(intfile, np.asarray(nc['SNOW'][t_idx], dtype=np.float64), 200100.0, proj, 'SNOW', hdate, 'kg m-2', map_source, 'Water equivalent snow depth')
