@@ -135,9 +135,10 @@ Then run `metgrid.exe` as usual. The intermediate files contain all the fields m
 | VV | 10m V-wind (m/s) | V10 (earth-relative) |
 | DEWPT | 2m dewpoint (K) | Q2, PSFC |
 | RH | 2m relative humidity (%) | T2, Q2, PSFC |
+| SPECHUMD | 2m specific humidity (kg/kg) | Q2 |
 | LANDSEA | Land-sea mask (0/1) | XLAND |
 | SEAICE | Sea ice fraction | SEAICE |
-| SST | Sea surface temperature (K) | SST |
+| SST | Sea surface temperature (K) | SST (land-filled) |
 | SOILHGT | Terrain height (m) | HGT |
 | SNOW | Snow water equivalent (kg/m2) | SNOW |
 | SNOWH | Physical snow depth (m) | SNOWH |
@@ -251,6 +252,27 @@ The original `WPSUtils.py` had LC=1, PS=2, MERC=3 (matching WPS internal codes, 
 **dx/dy units**: metgrid reads dx and dy from the intermediate file and multiplies by 1000 (i.e., it expects values in **km**, not meters). WRF stores DX/DY in meters, so the values must be divided by 1000 before writing. Writing meters (e.g., 3000.0) results in metgrid interpreting it as 3000 km.
 
 **earth_radius units**: Same convention as dx/dy. metgrid multiplies the earth_radius value from the intermediate file by 1000, so it expects the value in **km** (6371.229), not meters (6371229.0). ERA5 (era5_to_int) writes meters but this doesn't cause issues because the LATLON projection doesn't use earth_radius for grid positioning. For Lambert Conformal and other projected grids, the incorrect earth radius causes projection math errors, leading to missing values during interpolation.
+
+### Vertical interpolation and extrapolation
+
+The vertical interpolation from eta levels to pressure levels uses `numpy.interp` in log-pressure space. Constant extrapolation is used in both directions:
+
+- **Above model top** (target pressure < P_TOP): the topmost eta level value is used. This is necessary because the top WRF eta mass level sits slightly above P_TOP, so targeting exactly P_TOP or above would otherwise produce NaN. `real.exe` needs valid data at all pressure levels to interpolate to its own eta levels.
+- **Below ground** (target pressure > surface pressure): the lowest eta level value is used. ERA5 provides valid data at all pressure levels globally (including underground), and WPS/metgrid/real.exe expect this. `real.exe` identifies below-ground levels using PSFC and applies its own extrapolation, so the actual values don't matter — they just need to be present.
+
+### SST land-filling
+
+In WRF wrfout files, SST is 0 over land and valid (~290 K) over water. When metgrid interpolates to a new target grid, coastline points where the source and target land masks don't perfectly align get blended values (interpolation between 0 K and ~290 K), producing extreme SST values. This propagates to TSK and TSLB in `real.exe`, causing unrealistic surface fluxes during the WRF run.
+
+To prevent this, `wrf_to_int` fills SST over land with nearest-neighbor values from water points before writing the intermediate file (using `geointerp.GridInterpolator.interp_na`). This ensures that metgrid always interpolates between physically reasonable SST values at coastlines, regardless of land mask differences between the source and target domains.
+
+### Surface SPECHUMD
+
+`wrf_to_int` writes a surface-level SPECHUMD field derived from Q2 (2m water vapor mixing ratio) as `q2 / (1 + q2)`. Without this, metgrid fills the surface moisture level with a default value (-1.0), which corrupts `real.exe`'s dry pressure computation (`integ_moist`) and produces all-NaN pressure columns.
+
+### SOILHGT level convention
+
+SOILHGT (terrain height) is written at WPS level 200100.0 (the surface level), matching the convention used by `era5_to_int`. metgrid uses SOILHGT at this level to fill the surface level of GHT (geopotential height). Writing it at level 1.0 causes metgrid to warn about a missing field and can produce incorrect geopotential height values at below-ground pressure levels.
 
 ## Development
 

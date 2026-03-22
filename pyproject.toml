@@ -15,6 +15,7 @@ dependencies = [
     "h5py",
     "numpy>=2",
     "typer>=0.12",
+    "geointerp",
 ]
 
 [project.scripts]

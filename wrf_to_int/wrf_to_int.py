@@ -246,7 +246,6 @@ def interp_to_pressure_levels(field_3d, pressure_3d, target_levels_pa):
         sort_idx = np.argsort(log_p_col)
         result_2d[:, col] = np.interp(
             log_target, log_p_col[sort_idx], field_col[sort_idx],
-            right=np.nan,
         )
 
     return result
@@ -293,7 +292,7 @@ def get_soil_layer_names(nc):
 # Main processing
 
 
-def process_timestep(nc, t_idx, hdate, proj, intfile, target_pressure_levels_pa, map_source):
+def process_timestep(nc, t_idx, hdate, proj, intfile, target_pressure_levels_pa, map_source, fill_na=None):
     """Process one WRF timestep, writing fields variable-by-variable to reduce memory."""
 
     # --- pressure_3d is needed for all 3D interpolations ---
@@ -402,7 +401,11 @@ def process_timestep(nc, t_idx, hdate, proj, intfile, target_pressure_levels_pa,
         write_slab(intfile, np.asarray(nc['SEAICE'][t_idx], dtype=np.float64), 200100.0, proj, 'SEAICE', hdate, 'fraction', map_source, 'Sea ice fraction')
 
     if 'SST' in nc:
-        write_slab(intfile, np.asarray(nc['SST'][t_idx], dtype=np.float64), 200100.0, proj, 'SST', hdate, 'K', map_source, 'Sea surface temperature')
+        sst = np.asarray(nc['SST'][t_idx], dtype=np.float64)
+        if fill_na is not None:
+            sst[xland < 1.5] = np.nan
+            sst = fill_na(sst)
+        write_slab(intfile, sst, 200100.0, proj, 'SST', hdate, 'K', map_source, 'Sea surface temperature')
 
     write_slab(intfile, hgt, 200100.0, proj, 'SOILHGT', hdate, 'm', map_source, 'Terrain height')
 
@@ -503,6 +506,14 @@ def main(
             times = parse_wrf_times(nc)
             map_source = f'WRF output ({wrf_file.name})'
 
+            # Set up SST land-fill function (nearest-neighbor from water points)
+            fill_na = None
+            if 'SST' in nc:
+                from geointerp import GridInterpolator
+                ny, nx = nc['SST'].shape[1], nc['SST'].shape[2]
+                gi = GridInterpolator()
+                fill_na = gi.interp_na((np.arange(nx, dtype=float), np.arange(ny, dtype=float)), method='nearest')
+
             for t_idx, hdate in times:
                 # Parse hdate to datetime for filtering
                 dt = datetime.strptime(hdate[:13], '%Y-%m-%d_%H')  # noqa: DTZ007
@@ -513,7 +524,7 @@ def main(
                 print(f'  Writing {output_prefix}:{datestr}')
 
                 intfile = WPSUtils.IntermediateFile(output_prefix, datestr)
-                process_timestep(nc, t_idx, hdate, proj, intfile, target_levels_pa, map_source)
+                process_timestep(nc, t_idx, hdate, proj, intfile, target_levels_pa, map_source, fill_na)
                 intfile.close()
 
     print('\nDone.')
