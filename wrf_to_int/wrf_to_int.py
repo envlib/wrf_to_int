@@ -252,6 +252,135 @@ def interp_to_pressure_levels(field_3d, pressure_3d, target_levels_pa):
 
 
 ######################################################
+# Below-ground extrapolation (Trenberth et al. 1993)
+
+# Physical constants
+_R_D = 287.04       # Dry air gas constant (J/(kg·K))
+_G = 9.80616        # Gravity (m/s²)
+_G_INV = 1.0 / _G
+_GAMMA = 0.0065     # Standard lapse rate (K/m)
+_ALPHA = _GAMMA * _R_D * _G_INV
+
+
+def extrapolate_t_below_ground(result, pressure_3d, psfc_2d, temperature_3d, ght_3d, target_levels_pa):
+    """
+    ECMWF below-ground temperature extrapolation (Trenberth et al. 1993, Eq. 16).
+
+    Overwrites below-ground points in ``result`` with physically extrapolated
+    temperatures using the standard lapse rate with high-terrain corrections.
+
+    Parameters
+    ----------
+    result : np.ndarray
+        Shape (n_target, ny, nx). The interpolated TT field from
+        ``interp_to_pressure_levels``. Modified in-place.
+    pressure_3d : np.ndarray
+        Shape (nz, ny, nx). Full pressure on eta levels (P + PB).
+    psfc_2d : np.ndarray
+        Shape (ny, nx). Surface pressure (PSFC) — defines the ground.
+    temperature_3d : np.ndarray
+        Shape (nz, ny, nx). Actual temperature on eta levels.
+    ght_3d : np.ndarray
+        Shape (nz, ny, nx). Geopotential height on eta levels.
+    target_levels_pa : array-like
+        Target pressure levels in Pa.
+    """
+    # Bottom eta level values (closest to ground)
+    t_bot = temperature_3d[0]
+    p_sfc = pressure_3d[0]
+    phi_sfc = ght_3d[0] * _G
+    ps = psfc_2d
+    hgt = ght_3d[0]
+
+    tstar = t_bot * (1.0 + _ALPHA * (ps / p_sfc - 1.0))
+    t0 = tstar + _GAMMA * hgt
+
+    tplat = np.minimum(298.0, t0)
+
+    tprime0 = np.where(
+        (hgt >= 2000) & (hgt <= 2500),
+        0.002 * ((2500.0 - hgt) * t0 + (hgt - 2000.0) * tplat),
+        np.where(hgt > 2500, tplat, np.nan),
+    )
+
+    for k, p_target in enumerate(target_levels_pa):
+        below = p_target > ps
+        if not below.any():
+            continue
+
+        alnp = np.where(
+            hgt < 2000,
+            _ALPHA * np.log(p_target / ps),
+            np.where(
+                tprime0 >= tstar,
+                _R_D * (tprime0 - tstar) / phi_sfc * np.log(p_target / ps),
+                0.0,
+            ),
+        )
+
+        t_extrap = tstar * (1.0 + alnp + 0.5 * alnp**2 + (1.0 / 6.0) * alnp**3)
+        result[k] = np.where(below, t_extrap, result[k])
+
+
+def extrapolate_ght_below_ground(result, pressure_3d, psfc_2d, temperature_3d, ght_3d, target_levels_pa):
+    """
+    ECMWF below-ground geopotential height extrapolation (Trenberth et al. 1993, Eq. 15).
+
+    Overwrites below-ground points in ``result`` with physically extrapolated
+    geopotential heights consistent with the hydrostatic equation.
+
+    Parameters
+    ----------
+    result : np.ndarray
+        Shape (n_target, ny, nx). The interpolated GHT field from
+        ``interp_to_pressure_levels``. Modified in-place.
+    pressure_3d : np.ndarray
+        Shape (nz, ny, nx). Full pressure on eta levels (P + PB).
+    psfc_2d : np.ndarray
+        Shape (ny, nx). Surface pressure (PSFC) — defines the ground.
+    temperature_3d : np.ndarray
+        Shape (nz, ny, nx). Actual temperature on eta levels.
+    ght_3d : np.ndarray
+        Shape (nz, ny, nx). Geopotential height on eta levels.
+    target_levels_pa : array-like
+        Target pressure levels in Pa.
+    """
+    t_bot = temperature_3d[0]
+    p_sfc = pressure_3d[0]
+    phi_sfc = ght_3d[0] * _G
+    ps = psfc_2d
+    hgt = ght_3d[0]
+
+    tstar = t_bot * (1.0 + _ALPHA * (ps / p_sfc - 1.0))
+    t0 = tstar + _GAMMA * hgt
+
+    # Warm/cold corrections (applied to copies for GHT only)
+    alph = np.full_like(tstar, _ALPHA)
+    tstar_g = tstar.copy()
+
+    mask_warm_cross = (tstar <= 290.5) & (t0 > 290.5)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        alph = np.where(mask_warm_cross, _R_D / phi_sfc * (290.5 - tstar), alph)
+
+    mask_warm_both = (tstar > 290.5) & (t0 > 290.5)
+    alph = np.where(mask_warm_both, 0.0, alph)
+    tstar_g = np.where(mask_warm_both, 0.5 * (290.5 + tstar), tstar_g)
+
+    tstar_g = np.where(tstar_g < 255.0, 0.5 * (tstar_g + 255.0), tstar_g)
+
+    for k, p_target in enumerate(target_levels_pa):
+        below = p_target > ps
+        if not below.any():
+            continue
+
+        alnp = alph * np.log(p_target / ps)
+        ght_extrap = hgt - _R_D * tstar_g * _G_INV * np.log(p_target / ps) * (
+            1.0 + 0.5 * alnp + (1.0 / 6.0) * alnp**2
+        )
+        result[k] = np.where(below, ght_extrap, result[k])
+
+
+######################################################
 # Variable derivation functions
 
 
@@ -301,18 +430,31 @@ def process_timestep(nc, t_idx, hdate, proj, intfile, target_pressure_levels_pa,
         + np.asarray(nc['PB'][t_idx], dtype=np.float64)
     )
 
+    # Surface pressure for below-ground extrapolation
+    psfc_2d = np.asarray(nc['PSFC'][t_idx], dtype=np.float64)
+
     # --- Group 1: TT, RH, SPECHUMD (share T and QVAPOR) ---
     theta = np.asarray(nc['T'][t_idx], dtype=np.float64) + 300.0
     temperature_3d = theta * (pressure_3d / 100000.0) ** 0.2854
     del theta
 
-    _write_interp_slabs(intfile, temperature_3d, pressure_3d, target_pressure_levels_pa,
-                        proj, hdate, map_source, 'TT', 'K', 'Temperature')
+    # GHT needed for both its own output and TT/GHT extrapolation
+    ght_3d = unstagger(
+        (np.asarray(nc['PH'][t_idx], dtype=np.float64)
+         + np.asarray(nc['PHB'][t_idx], dtype=np.float64)) / _G,
+        axis=0,
+    )
+
+    # TT: interpolate + ECMWF below-ground extrapolation
+    tt_interp = interp_to_pressure_levels(temperature_3d, pressure_3d, target_pressure_levels_pa)
+    extrapolate_t_below_ground(tt_interp, pressure_3d, psfc_2d, temperature_3d, ght_3d, target_pressure_levels_pa)
+    for k, plevel_pa in enumerate(target_pressure_levels_pa):
+        write_slab(intfile, tt_interp[k], plevel_pa, proj, 'TT', hdate, 'K', map_source, 'Temperature')
+    del tt_interp
 
     qvapor_3d = np.asarray(nc['QVAPOR'][t_idx], dtype=np.float64)
 
     rh_3d = compute_relative_humidity(temperature_3d, qvapor_3d, pressure_3d)
-    del temperature_3d
     _write_interp_slabs(intfile, rh_3d, pressure_3d, target_pressure_levels_pa,
                         proj, hdate, map_source, 'RH', '%', 'Relative humidity')
     del rh_3d
@@ -323,15 +465,12 @@ def process_timestep(nc, t_idx, hdate, proj, intfile, target_pressure_levels_pa,
                         proj, hdate, map_source, 'SPECHUMD', 'kg kg-1', 'Specific humidity')
     del spechumd_3d
 
-    # --- Group 2: GHT ---
-    ght_3d = unstagger(
-        (np.asarray(nc['PH'][t_idx], dtype=np.float64)
-         + np.asarray(nc['PHB'][t_idx], dtype=np.float64)) / 9.81,
-        axis=0,
-    )
-    _write_interp_slabs(intfile, ght_3d, pressure_3d, target_pressure_levels_pa,
-                        proj, hdate, map_source, 'GHT', 'm', 'Geopotential height')
-    del ght_3d
+    # GHT: interpolate + ECMWF below-ground extrapolation
+    ght_interp = interp_to_pressure_levels(ght_3d, pressure_3d, target_pressure_levels_pa)
+    extrapolate_ght_below_ground(ght_interp, pressure_3d, psfc_2d, temperature_3d, ght_3d, target_pressure_levels_pa)
+    for k, plevel_pa in enumerate(target_pressure_levels_pa):
+        write_slab(intfile, ght_interp[k], plevel_pa, proj, 'GHT', hdate, 'm', map_source, 'Geopotential height')
+    del ght_interp, ght_3d, temperature_3d
 
     # --- Group 3: UU, VV (wind rotation requires both) ---
     u_grid = unstagger(np.asarray(nc['U'][t_idx], dtype=np.float64), axis=2)
@@ -358,8 +497,7 @@ def process_timestep(nc, t_idx, hdate, proj, intfile, target_pressure_levels_pa,
     del pressure_3d
 
     # --- Surface fields ---
-    psfc = np.asarray(nc['PSFC'][t_idx], dtype=np.float64)
-    write_slab(intfile, psfc, 200100.0, proj, 'PSFC', hdate, 'Pa', map_source, 'Surface pressure')
+    write_slab(intfile, psfc_2d, 200100.0, proj, 'PSFC', hdate, 'Pa', map_source, 'Surface pressure')
 
     t2 = np.asarray(nc['T2'][t_idx], dtype=np.float64)
     hgt = np.asarray(nc['HGT'][t_idx], dtype=np.float64)
